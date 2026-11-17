@@ -1,0 +1,23 @@
+{
+  "name": "knock-2d3d-horror-demo",
+  "version": "1.0.0",
+  "description": "2D/3D 切换恐怖游戏 Demo",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GA10d/project_2d3d_horror_game.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/GA10d/project_2d3d_horror_game/issues"
+  },
+  "homepage": "https://github.com/GA10d/project_2d3d_horror_game#readme",
+  "dependencies": {
+    "three": "^0.187.0"
+  }
+}
