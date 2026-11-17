@@ -11,6 +11,14 @@ npm start
 
 然后打开 http://localhost:5173 。建议戴耳机。
 
+## 打包给别人玩
+
+```bash
+node tools/package.mjs
+```
+
+生成 `dist/Knock-demo.zip`（约 100MB）。对方解压后双击 `Play-Knock.bat` 即可，不需要安装 Node.js：启动器用 Windows 自带的 PowerShell 开本地服务器。
+
 ## 操作
 
 - `WASD` 移动，`Shift` 奔跑，`E` 互动 / 继续对话
