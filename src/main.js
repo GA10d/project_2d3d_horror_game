@@ -230,6 +230,7 @@ const story = G.story = {
   async doorReached() {
     if (G.busy) return;
     G.step = 9; w2.monster = null; w2.target = null; G.ui.objective(null);
+    G.sfx.chase(false);
     await to3D('porch');
     G.sfx.setWind(.85); G.sfx.setDrone(.15);
     w3.porchEnding();

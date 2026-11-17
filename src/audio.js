@@ -137,6 +137,41 @@ export class Sfx {
     this.noise({ dur: .7, freq: 1800, type: 'highpass', vol: vol * 1.1 });
     this.tone({ freq: 55, f2: 30, dur: 1.1, vol: vol * 1.4 });
   }
+  // 墙体移动的低频隆隆声
+  rumble(dur = 1.8) {
+    this.noise({ dur, freq: 110, vol: 2.2 }); this.noise({ dur: dur * .8, freq: 420, q: 2, type: 'bandpass', vol: .5 });
+    this.tone({ freq: 46, f2: 30, dur, type: 'sawtooth', vol: .5, attack: .15 });
+  }
+  // 追逐音乐：150 BPM 的十六分音符低音 + 鼓点 + 颤动的不协和高音
+  chase(on) {
+    if (!this.ctx) return;
+    if (!on) {
+      clearInterval(this._chT); this._chT = null;
+      if (this._chS) { const { g, os } = this._chS; g.gain.setTargetAtTime(0, this.ctx.currentTime, .15); setTimeout(() => os.forEach((o) => o.stop()), 900); this._chS = null; }
+      return;
+    }
+    if (this._chT) return;
+    const ctx = this.ctx, g = ctx.createGain(); g.gain.value = 0;
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 900; bp.Q.value = .8;
+    const trem = ctx.createGain(); trem.gain.value = .6;
+    const lfo = ctx.createOscillator(); lfo.frequency.value = 11; const lg = ctx.createGain(); lg.gain.value = .4; lfo.connect(lg); lg.connect(trem.gain);
+    const os = [293.7, 587.3, 622.3, 880].map((f) => { const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f; o.connect(bp); o.start(); return o; });
+    lfo.start(); os.push(lfo);
+    bp.connect(trem); trem.connect(g); g.connect(this.master);
+    g.gain.setTargetAtTime(.075, ctx.currentTime, .4);
+    this._chS = { g, os };
+    const bass = [73.4, 73.4, 87.3, 73.4, 110, 73.4, 103.8, 98];
+    let i = 0;
+    this._chT = setInterval(() => {
+      const st = i % 16;
+      if (st % 4 === 0) this.tone({ freq: 120, f2: 36, dur: .17, vol: 1.1 });
+      if (st % 8 === 4) this.noise({ dur: .13, freq: 1700, q: .8, type: 'bandpass', vol: .7 });
+      if (st % 2 === 1) this.noise({ dur: .04, freq: 7000, type: 'highpass', vol: .18 });
+      this.tone({ freq: bass[(i >> 1) % 8] * (st % 2 ? 2 : 1), dur: .1, type: 'sawtooth', vol: .2 });
+      if (st === 14) this.tone({ freq: 1244, f2: 1175, dur: .22, type: 'square', vol: .05 });
+      i++;
+    }, 100);
+  }
   glitch() {
     for (let i = 0; i < 7; i++) this.tone({ freq: 80 + Math.random() * 1800, dur: .04, type: 'square', vol: .16, when: i * .05 });
     this.noise({ dur: .35, freq: 2500, type: 'bandpass', q: 3, vol: .5 });
