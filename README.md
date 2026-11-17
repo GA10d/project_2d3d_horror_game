@@ -24,8 +24,9 @@ npm start
 4. 卧室（3D）：开衣柜拿保险丝
 5. 走廊（2D）：人影逐次逼近 → 强制闪切 3D
 6. 地下室（3D）：装保险丝、扳三个电闸 → 来电 → 灯灭追逐
-7. 小屋（2D）：被追着逃向正门 → 三下敲门声
-8. 门口（3D）：结局
+7. 小屋（2D）：被追着逃向正门
+8. 门外（3D）：门自己关上并反锁，玩家亲手敲门，敲到第四下
+9. 屋里（2D）：画面切回开局厨房的那一幕——「四下的，是鬼。」
 
 ## 结构
 
@@ -38,4 +39,6 @@ npm start
 
 ## 素材来源
 
-`assets/` 下的 15 个扫描模型和 8 套 PBR 贴图全部来自 [Poly Haven](https://polyhaven.com)，协议为 CC0（可自由使用，无需署名）。具体清单见 `src/assets.js`。
+`assets/` 下的 23 个模型和 8 套 PBR 贴图全部来自 [Poly Haven](https://polyhaven.com)，协议为 CC0（可自由使用，无需署名）。具体清单见 `src/assets.js`。
+
+地下室墙上的手印来自 Henri Guérard《The Artist's Left Hand》（1890 年代，美国国家美术馆藏，经 Wikimedia Commons，CC0）。

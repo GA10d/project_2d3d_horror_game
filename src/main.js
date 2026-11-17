@@ -29,10 +29,19 @@ window.__G = G;
 const dlg = { queue: [], res: null };
 function nextLine() {
   if (!dlg.queue.length) { $('dlg').style.display = 'none'; G.talking = false; const r = dlg.res; dlg.res = null; r && r(); return; }
-  $('dlgText').textContent = dlg.queue.shift();
-  $('dlg').style.display = 'block';
+  showLine(dlg.queue.shift(), true);
   G.sfx.tick();
 }
+// 一行对话可以是字符串（内心独白），也可以是 { who, text }（说出口的话 / 有来源的声音）
+function showLine(line, hint) {
+  const who = typeof line === 'string' ? null : line.who, text = typeof line === 'string' ? line : line.text;
+  $('dlgWho').textContent = who || ''; $('dlgWho').style.display = who ? 'block' : 'none';
+  $('dlgText').textContent = text;
+  $('dlg').lastElementChild.style.display = hint ? 'block' : 'none';
+  $('dlg').style.display = 'block';
+}
+// 不需要按键、定时消失的字幕（结局演出用）
+G.caption = async (text, who, ms) => { showLine({ who, text }, false); G.sfx.tick(); await wait(ms); $('dlg').style.display = 'none'; };
 G.say = (lines) => new Promise((res) => { dlg.queue = [...lines]; dlg.res = res; G.talking = true; nextLine(); });
 
 G.ui = {
@@ -67,7 +76,7 @@ $('grain').style.backgroundImage = `url(${grainURL()})`;
 function showMode() {
   const d3 = G.mode === '3d';
   $('c2d').style.display = d3 ? 'none' : 'block';
-  for (const id of ['c3d', 'grain', 'vignette', 'cross']) $(id).style.display = d3 ? 'block' : 'none';
+  for (const id of ['c3d', 'cross']) $(id).style.display = d3 ? 'block' : 'none';
   if (!d3) $('lockhint').style.display = 'none';
 }
 function lock() { try { const r = $('stage').requestPointerLock(); if (r && r.catch) r.catch(() => {}); } catch { /* 无指针锁也能用方向键 */ } }
@@ -138,7 +147,7 @@ const story = G.story = {
     await wait(700);
     G.sfx.knock(4, { vol: .9, pan: .6 });
     await wait(2400);
-    await G.say(['……敲门声？', '一、二、三……', '四下。']);
+    await G.say(['……敲门声？', '一、二、三……四下。', { who: '阿远', text: '「四下的，是鬼。」' }, '……我怎么把这句话说出口了。']);
     G.step = 2;
     G.ui.objective('回客厅看看', '敲门声是从正门传来的');
     w2.target = { tx: 10, ty: 9 };
@@ -199,7 +208,7 @@ const story = G.story = {
   async leaveCellar() {
     await to2D(1, 8, 'right');
     G.step = 7; G.sfx.setWind(.7);
-    G.ui.objective('逃出小屋！', '按住 Shift 奔跑 · 从正门出去');
+    G.ui.objective('逃出小屋！', '按住 Shift 奔跑 · 冲向正门');
     w2.target = { tx: 10, ty: 10 };
     G.busy = false;
     spawnMonster();
@@ -217,29 +226,39 @@ const story = G.story = {
     spawnMonster();
   },
 
-  doorReached: () => scene(async () => {
-    G.step = 8; w2.monster = null; w2.target = null; G.sfx.setWind(.12);
-    await wait(900);
-    G.sfx.knock(3, { vol: 1.1 });
-    await wait(1900);
-    await G.say(['……它不见了。', '有人在敲门。', '一、二、三。', '三下。三下的是人！']);
-    G.ui.objective('开门', '');
-    w2.target = { tx: 10, ty: 10 };
-  }),
-
-  async frontDoor() {
+  // 冲到正门：夺门而出（切到屋外 3D）
+  async doorReached() {
     if (G.busy) return;
-    if (G.step !== 8) return scene(() => G.say(G.step < 3 ? ['外面是暴风雪，车也陷住了。', '先把电弄好，熬到天亮再说。'] : ['门外只有风雪。……先把电弄好。']));
-    G.step = 9; G.ui.objective(null);
+    G.step = 9; w2.monster = null; w2.target = null; G.ui.objective(null);
     await to3D('porch');
-    G.sfx.setWind(.8); G.sfx.setDrone(.2);
-    await w3.porchEnding();
-    await G.ui.fade(1, 0);
+    G.sfx.setWind(.85); G.sfx.setDrone(.15);
+    w3.porchEnding();
+  },
+
+  frontDoor() {
+    if (G.busy) return;
+    return scene(() => G.say(G.step < 3 ? ['外面是暴风雪，车也陷住了。', '先把电弄好，熬到天亮再说。'] : ['门外只有风雪。……先把电弄好。']));
+  },
+
+  // 轮回收尾：镜头切回屋里的 2D 画面——正是开局厨房里的那一幕
+  async loopReplay() {
+    G.busy = true;
     if (document.pointerLockElement) document.exitPointerLock();
+    G.ui.prompt(null); G.ui.hold(0); G.ui.objective(null);
+    Object.assign(w2, { monster: null, ghost: null, target: null, frontOpen: false, footprints: false, blackout: false, flick: 1 });
+    w2.place(2, 2, 'up'); w2.windowShadow = 1.3; w2.glitchT = .3;
+    G.mode = '2d'; showMode(); w3.setRes(1);
+    G.sfx.glitch(); G.sfx.setDrone(0); G.sfx.setWind(.45);
+    await G.caption('一、二、三……四下。', null, 2100);
+    w2.p.dir = 'right';                       // 他朝正门的方向转过头
+    await wait(450);
+    await G.caption('「四下的，是鬼。」', '阿远', 1500);
+    // 戛然而止
+    await G.ui.fade(1, 0);
     G.sfx.setWind(0); G.sfx.setDrone(0);
-    await wait(1800);
     G.started = false;
-    for (const id of ['c2d', 'c3d', 'grain', 'vignette', 'cross', 'obj', 'prompt', 'lockhint']) $(id).style.display = 'none';
+    for (const id of ['c2d', 'c3d', 'grain', 'vignette', 'cross', 'obj', 'prompt', 'lockhint', 'dlg']) $(id).style.display = 'none';
+    await wait(2200);
     $('end').style.display = 'flex';
     await G.ui.fade(0, 1500);
   },
@@ -256,7 +275,7 @@ w2.inter.push(
   { tx: 2, ty: 1, label: () => '打开抽屉', act: story.drawer },
   { tx: 10, ty: 0, label: () => '卧室', act: () => story.bedroomDoor() },
   { tx: 0, ty: 8, label: () => '地下室', act: () => story.cellarDoor() },
-  { tx: 10, ty: 10, label: () => (G.step === 8 ? '开门' : '正门'), act: () => story.frontDoor() },
+  { tx: 10, ty: 10, label: () => '正门', act: () => story.frontDoor() },
   { tx: 18, ty: 5.5, label: () => '壁炉', act: () => scene(() => G.say(['炉灰是凉的。', '只有正中间一小块是湿的——像是有什么东西，刚从烟囱里下来过。'])) },
   { tx: 16.5, ty: 1, label: () => '书架', act: () => scene(() => G.say(['相册里夹着一张全家福。', '爷爷身后的窗户外面……好像多站了一个人。'])) },
 );

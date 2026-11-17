@@ -5,23 +5,16 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { pbr, model } from './assets.js';
+import { pbr, model, handprint } from './assets.js';
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const rnd = (a, b) => a + Math.random() * (b - a);
 
 // ---------- 少量仍需程序生成的贴图 ----------
 function mk(w, h, draw) { const c = document.createElement('canvas'); c.width = w; c.height = h; draw(c.getContext('2d'), w, h); return c; }
-function handCanvas() {
-  return mk(128, 160, (x) => {
-    x.fillStyle = 'rgba(8,3,3,.88)';
-    x.beginPath(); x.ellipse(64, 108, 30, 34, 0, 0, 7); x.fill();
-    const f = [[26, 62, -.35, 34], [45, 40, -.12, 42], [66, 34, .04, 45], [86, 42, .2, 40], [108, 86, .9, 28]];
-    for (const [fx, fy, a, l] of f) { x.save(); x.translate(fx, fy); x.rotate(a); x.beginPath(); x.ellipse(0, 0, 8, l / 2 + 6, 0, 0, 7); x.fill(); x.restore(); }
-    x.fillRect(50, 130, 5, 30); x.fillRect(74, 132, 4, 22);
-  });
-}
 function glowCanvas() {
   return mk(64, 64, (x) => {
     const gr = x.createRadialGradient(32, 32, 0, 32, 32, 32);
@@ -34,6 +27,58 @@ export const grainURL = () => mk(128, 128, (x) => {
   for (let i = 0; i < d.data.length; i += 4) { const v = Math.random() * 255; d.data[i] = d.data[i + 1] = d.data[i + 2] = v; d.data[i + 3] = 255; }
   x.putImageData(d, 0, 0);
 }).toDataURL();
+
+// 手电筒的光斑：中心热点 + 反光杯造成的同心环 + 镜片上的灰尘
+function cookieCanvas() {
+  return mk(512, 512, (x) => {
+    x.fillStyle = '#000'; x.fillRect(0, 0, 512, 512);
+    const g = x.createRadialGradient(256, 256, 0, 256, 256, 250);
+    g.addColorStop(0, '#fff'); g.addColorStop(.2, '#f2eee4'); g.addColorStop(.42, '#c4c0b4'); g.addColorStop(.72, '#9d998e');
+    g.addColorStop(.86, '#b4b0a4'); g.addColorStop(.94, '#454340'); g.addColorStop(1, '#000');
+    x.fillStyle = g; x.fillRect(0, 0, 512, 512);
+    x.globalCompositeOperation = 'multiply';
+    for (const [r, a] of [[92, .08], [150, .06], [205, .1]]) { x.strokeStyle = `rgba(0,0,0,${a})`; x.lineWidth = 7; x.beginPath(); x.arc(256 + rnd(-4, 4), 256 + rnd(-4, 4), r, 0, 7); x.stroke(); }
+    for (let i = 0; i < 26; i++) { x.fillStyle = `rgba(0,0,0,${rnd(.08, .3)})`; x.beginPath(); x.arc(rnd(60, 450), rnd(60, 450), rnd(1.5, 6), 0, 7); x.fill(); }
+  });
+}
+// 最终镜头处理：色散、冷暖分离调色、胶片颗粒、暗角
+const LensShader = {
+  uniforms: { tDiffuse: { value: null }, time: { value: 0 }, res: { value: new THREE.Vector2(1280, 720) } },
+  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `
+    uniform sampler2D tDiffuse; uniform float time; uniform vec2 res; varying vec2 vUv;
+    void main(){
+      vec2 d = vUv - .5; float r2 = dot(d, d); vec2 off = d * r2 * .014;
+      vec3 c = vec3(texture2D(tDiffuse, vUv + off).r, texture2D(tDiffuse, vUv).g, texture2D(tDiffuse, vUv - off).b);
+      float l = dot(c, vec3(.299, .587, .114));
+      c = mix(c * vec3(.90, .98, 1.10), c * vec3(1.05, 1.0, .93), smoothstep(0., .55, l));
+      c = mix(vec3(l), c, .9);
+      c = (c - .5) * 1.05 + .5;
+      float n = fract(sin(dot(floor(vUv * res) + time * 61., vec2(12.9898, 78.233))) * 43758.5453);
+      c += (n - .5) * .04 * (1. - l * .6);
+      c *= 1. - smoothstep(.12, .75, r2) * .85;
+      gl_FragColor = vec4(max(c, 0.), 1.);
+    }`,
+};
+// 光柱里的浮尘：只有落在手电光锥内的尘埃才会被照亮
+const DustShader = {
+  uniforms: { uCam: { value: new THREE.Vector3() }, uTime: { value: 0 }, uFlash: { value: 0 }, uScale: { value: 400 } },
+  vertexShader: `
+    uniform vec3 uCam; uniform float uTime, uScale; attribute float seed; varying float vA;
+    void main(){
+      vec3 p = position + vec3(sin(uTime * .21 + seed * 40.), uTime * .035 * (seed - .3), cos(uTime * .17 + seed * 30.)) * .35;
+      p = mod(p - uCam + 3., 6.) - 3. + uCam;
+      vec4 mv = modelViewMatrix * vec4(p, 1.);
+      float dist = -mv.z;
+      float cone = smoothstep(.925, .975, dot(normalize(mv.xyz), vec3(0., 0., -1.)));
+      vA = cone * smoothstep(.25, .7, dist) * (1. - smoothstep(2.2, 3., dist)) * (.5 + .5 * sin(uTime * 2. + seed * 90.));
+      gl_PointSize = (.006 + seed * .008) * uScale / max(dist, .2);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    uniform float uFlash; varying float vA;
+    void main(){ float d = length(gl_PointCoord - .5); gl_FragColor = vec4(vec3(1., .93, .8) * smoothstep(.5, .1, d) * vA * uFlash, 1.); }`,
+};
 
 const flat = (color, o = {}) => new THREE.MeshStandardMaterial({ color, roughness: o.rough ?? .9, metalness: o.metal ?? 0 });
 
@@ -58,7 +103,13 @@ export class World3D {
     this.composer = new EffectComposer(r, rt);
     this.renderPass = new RenderPass(this.scene, this.camera);
     this.bloom = new UnrealBloomPass(new THREE.Vector2(4, 4), .28, .6, .95);
-    this.composer.addPass(this.renderPass); this.composer.addPass(this.bloom); this.composer.addPass(new OutputPass());
+    this.gtao = new GTAOPass(this.scene, this.camera, 4, 4);          // 环境光遮蔽：让家具「落地」，墙角缝隙变暗
+    this.gtao.updateGtaoMaterial({ radius: .45, distanceExponent: 1.4, thickness: 1.2, scale: 1.25, samples: 12 });
+    this.gtao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 6, rings: 2, samples: 12 });
+    this.lens = new ShaderPass(LensShader);
+    for (const p of [this.renderPass, this.gtao, this.bloom, new OutputPass(), this.lens]) this.composer.addPass(p);
+    this.cookie = new THREE.CanvasTexture(cookieCanvas()); this.cookie.colorSpace = THREE.SRGBColorSpace;
+    this.ray = new THREE.Raycaster();
     this.resize();
     addEventListener('resize', () => this.resize());
   }
@@ -69,6 +120,7 @@ export class World3D {
     this.renderer.setPixelRatio(1);
     this.renderer.setSize(w, h, false);
     this.composer.setSize(w, h);
+    this.lens.uniforms.res.value.set(w, h);
   }
   setRes(s) { this.res = s; this.resize(); }
   async animRes(levels, ms) { for (const s of levels) { this.setRes(s); await this.G.wait(ms); } }
@@ -79,22 +131,33 @@ export class World3D {
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x000000);
     this.scene.environment = this.envMap; this.scene.environmentIntensity = .06;
-    this.renderPass.scene = this.scene;
+    this.renderPass.scene = this.scene; this.gtao.scene = this.scene;
+    this.solids = []; this.frame = 0;
     this.name = name;
     this.colliders = []; this.inter = []; this.tick = null; this.st = {};
     this.canMove = true; this.lockLook = false; this.lightOff = false; this.flickerT = 0; this.shake = 0;
-    this.walkSpeed = 1.9; this.runSpeed = 3.6; this.holdT = 0; this.weak = false;
+    this.walkSpeed = 1.9; this.runSpeed = 3.6; this.holdT = 0; this.weak = false; this.dustOff = false;
     this.p.pitch = 0; this.p.bob = 0;
     this.camera.clear();                 // 相机跨场景复用：先摘掉上一个场景挂在它身上的灯
     this.scene.add(this.camera);
     // 手电筒
-    this.flashBase = 44;
+    this.flashBase = 84;
     const f = this.flash = new THREE.SpotLight(0xfff0d8, this.flashBase, 20, .37, .8, 1.5);
+    f.map = this.cookie; f.shadow.radius = 2.5; f.shadow.blurSamples = 12;
     f.position.set(.06, -.08, 1.2); f.castShadow = true;   // 光源放在身后 1.2m：贴近墙面时不会过曝 f.shadow.mapSize.set(2048, 2048); f.shadow.bias = -.0015; f.shadow.normalBias = .02;
     f.shadow.camera.near = 1.35; f.shadow.camera.far = 20;
     const tg = new THREE.Object3D(); tg.position.set(0, .05, -4);
     this.camera.add(f); this.camera.add(tg); f.target = tg;
     this.faceLight = new THREE.PointLight(0xfff0e0, 0, 2.5); this.faceLight.position.set(0, -.3, -.12); this.camera.add(this.faceLight);
+    // 手电照到的表面把光反弹回房间（廉价的单次间接光）
+    this.bounce = new THREE.PointLight(0xffd2a6, 0, 7, 1.8); this.scene.add(this.bounce);
+    this.bounceTo = new THREE.Vector3(); this.bounceI = 0;
+    // 浮尘
+    const N = 900, dp = new Float32Array(N * 3), ds = new Float32Array(N);
+    for (let i = 0; i < N; i++) { dp[i * 3] = rnd(0, 6); dp[i * 3 + 1] = rnd(0, 6); dp[i * 3 + 2] = rnd(0, 6); ds[i] = Math.random(); }
+    const dg = new THREE.BufferGeometry(); dg.setAttribute('position', new THREE.BufferAttribute(dp, 3)); dg.setAttribute('seed', new THREE.BufferAttribute(ds, 1));
+    this.dustMat = new THREE.ShaderMaterial({ ...DustShader, uniforms: THREE.UniformsUtils.clone(DustShader.uniforms), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+    this.dust = new THREE.Points(dg, this.dustMat); this.dust.frustumCulled = false; this.scene.add(this.dust);
     // 目标光点
     this.marker = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(glowCanvas()), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, fog: false }));
     this.marker.scale.set(.2, .2, 1); this.marker.visible = false; this.scene.add(this.marker);
@@ -106,7 +169,7 @@ export class World3D {
 
   box(w, h, d, mat, x, y, z, solid = false) {
     const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
-    m.position.set(x, y, z); m.castShadow = m.receiveShadow = true; this.scene.add(m);
+    m.position.set(x, y, z); m.castShadow = m.receiveShadow = true; this.scene.add(m); this.solids.push(m);
     if (solid) this.colliders.push({ x0: x - w / 2, x1: x + w / 2, z0: z - d / 2, z1: z + d / 2 });
     return m;
   }
@@ -121,6 +184,21 @@ export class World3D {
     if (solid) this.colliders.push({ x0: b.min.x, x1: b.max.x, z0: b.min.z, z1: b.max.z });
     return m;
   }
+  // 从 (x, fromY, z) 垂直向下打一条射线，返回 target 上第一个朝上的表面高度
+  surfaceY(target, x, z, fromY, fallback) {
+    target.updateMatrixWorld(true);
+    this.ray.set(new THREE.Vector3(x, fromY, z), new THREE.Vector3(0, -1, 0)); this.ray.far = 10;
+    for (const h of this.ray.intersectObject(target, true)) {
+      const n = h.face.normal.clone().transformDirection(h.object.matrixWorld);
+      if (n.y > .5) return h.point.y;
+    }
+    return fallback;
+  }
+  // 把模型 id 放在 target 的表面上
+  propOn(target, id, x, z, fromY, o = {}) {
+    const y = this.surfaceY(target, x, z, fromY, null);
+    return y === null ? null : this.prop(id, { ...o, x, y, z });
+  }
   // 地板 + 天花板 + 四面墙（skip 中列出的墙不建）
   shell(x0, x1, z0, z1, h, floorId, wallId, ceilId, skip = '') {
     const w = x1 - x0, d = z1 - z0, cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
@@ -133,26 +211,13 @@ export class World3D {
     if (!skip.includes('E')) this.box(.2, h, d, pbr(wallId, d / 2, h / 2), x1 + .1, h / 2, cz);
   }
 
-  // 「它」：从头顶垂到地面的黑布，布里露出一张大理石雕像的脸
+  // 「它」：一尊戴冠、蒙面、缠着锁链的哥特石像（Poly Haven 扫描级模型，CC0）。
+  // 它不会走——只会在你没看着的时候，换一个更近的位置。
   makeFigure() {
-    const g = new THREE.Group();
-    const pts = [[.07, 1.8], [.13, 1.77], [.23, 1.68], [.265, 1.52], [.23, 1.25], [.215, .9], [.25, .45], [.31, .08], [.33, 0]].map(([r, y]) => new THREE.Vector2(r, y));
-    const geo = new THREE.LatheGeometry(pts, 40);
-    const pos = geo.attributes.position;
-    for (let i = 0; i < pos.count; i++) {               // 布褶：越往下越明显
-      const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i), a = Math.atan2(z, x);
-      const k = 1 + (Math.sin(a * 9 + y * 2.5) * .07 + Math.sin(a * 4 - y * 4) * .05) * (1 - y / 1.9);
-      pos.setXYZ(i, x * k, y, z * k * .82);
-    }
-    geo.computeVertexNormals();
-    const shroud = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0x08080a, roughness: 1, side: THREE.DoubleSide }));
-    shroud.castShadow = true; g.add(shroud);
-    const hood = new THREE.Mesh(new THREE.SphereGeometry(.165, 24, 16, 0, Math.PI * 2, 0, Math.PI * .7), shroud.material);   // 罩住后脑的兜帽
-    hood.position.set(0, 1.94, -.05); hood.scale.set(.95, 1.12, 1.1); hood.castShadow = true; g.add(hood);
-    const bust = model('marble_bust_01');
-    bust.scale.setScalar(1.12); bust.position.y = 1.5;
-    bust.traverse((o) => { if (o.isMesh) { o.material = o.material.clone(); o.material.color.setHex(0x77726a); o.material.envMapIntensity = 0; } });
-    g.add(bust);
+    const g = new THREE.Group(), m = model('gothic_statue');
+    m.scale.setScalar(1.18);
+    m.traverse((o) => { if (o.isMesh) { o.material = o.material.clone(); o.material.color.setHex(0xb8b4aa); o.material.envMapIntensity = .3; } });
+    g.add(m);
     return g;
   }
   faceTo(obj, x, z) { obj.rotation.y = Math.atan2(x - obj.position.x, z - obj.position.z); }
@@ -168,9 +233,9 @@ export class World3D {
     const p = this.p, f = this.fig;
     p.pitch = 0; this.lockLook = true;
     const sx = -Math.sin(p.yaw), sz = -Math.cos(p.yaw);
-    f.visible = true; f.position.set(p.x + sx * .42, -.33, p.z + sz * .42); this.faceTo(f, p.x, p.z);
+    f.visible = true; f.position.set(p.x + sx * .62, -.2, p.z + sz * .62); this.faceTo(f, p.x, p.z);
     const wasOff = this.lightOff; this.lightOff = true;      // 近距离关掉手电，只留一盏自下而上的弱光
-    this.faceLight.intensity = .22; this.shake = ms / 1000;
+    this.faceLight.intensity = 1.1; this.shake = ms / 1000;
     this.G.sfx.stinger();
     await this.G.wait(ms);
     this.faceLight.intensity = 0; this.lockLook = false; this.lightOff = wasOff;
@@ -224,6 +289,23 @@ export class World3D {
     if (this.flickerT > 0) this.flickerT -= dt;
     const flick = this.flickerT > 0 ? Math.random() < .5 : this.weak && Math.random() < .12;
     this.flash.intensity = this.lightOff ? 0 : flick ? this.flashBase * rnd(0, .3) : this.flashBase;
+    this.frame++;
+    if (this.frame % 2 === 0) {
+      this.ray.setFromCamera({ x: 0, y: .03 }, this.camera); this.ray.far = 14;
+      const hit = this.ray.intersectObjects(this.solids, false)[0];
+      if (hit) {
+        const n = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
+        this.bounceTo.copy(hit.point).addScaledVector(n, .35);
+        this.bounceI = .075 / (1 + hit.distance * .22);
+      } else this.bounceI = 0;
+    }
+    this.bounce.position.lerp(this.bounceTo, Math.min(1, dt * 10));
+    this.bounce.intensity += (this.flash.intensity * this.bounceI - this.bounce.intensity) * Math.min(1, dt * 14);
+    this.dustMat.uniforms.uCam.value.copy(this.camera.position);
+    this.dustMat.uniforms.uTime.value = this.t;
+    this.dustMat.uniforms.uFlash.value = this.dustOff ? 0 : Math.min(1, this.flash.intensity / 60) * .8;
+    this.dustMat.uniforms.uScale.value = this.renderer.domElement.height;
+    this.lens.uniforms.time.value = this.t % 100;
     if (this.tick) this.tick(dt);
     if (this.marker.visible) this.marker.material.opacity = .45 + Math.sin(this.t * 4) * .3;
 
@@ -282,9 +364,17 @@ export class World3D {
     this.box(1.9, .015, 1.3, pbr('dirty_carpet', 1.4, 1, { color: 0x6a5a4c }), -.1, .008, .3);
     // 家具（扫描模型）
     this.prop('GothicBed_01', { x: -1.72, z: -.95, solid: true });
-    this.prop('ClassicNightstand_01', { x: -.72, z: -1.72, solid: true });
-    const lampM = this.prop('vintage_oil_lamp', { x: -.72, y: .7, z: -1.72, s: .7 });
-    st.lamp = new THREE.PointLight(0xff9a3c, 1.1, 5, 1.6); st.lamp.position.set(-.72, 1.06, -1.72); s.add(st.lamp);
+    const base = pbr('dark_wooden_planks', 2.5, .1);                                    // 踢脚线
+    this.box(5, .11, .03, base, 0, .055, -1.985); this.box(5, .11, .03, base, 0, .055, 1.985);
+    this.box(.03, .11, 4, base, -2.485, .055, 0); this.box(.03, .11, 4, base, 2.485, .055, 0);
+    const ns = this.prop('ClassicNightstand_01', { x: -.72, z: -1.72, solid: true });
+    const lampY = this.surfaceY(ns, -.72, -1.72, 1.3, .7);
+    const lampM = this.prop('vintage_oil_lamp', { x: -.72, y: lampY, z: -1.72, s: .7 });
+    st.lamp = new THREE.PointLight(0xff9a3c, 1.1, 5, 1.6); st.lamp.position.set(-.72, lampY + .36, -1.72); s.add(st.lamp);
+    st.lamp.castShadow = true; st.lamp.shadow.mapSize.set(512, 512); st.lamp.shadow.bias = -.004; st.lamp.shadow.radius = 4;
+    const dr = this.prop('vintage_wooden_drawer_01', { x: .5, z: 1.62, ry: Math.PI, s: .7, solid: true });   // 斗柜
+    this.propOn(dr, 'brass_candleholders', .3, 1.66, 1.6, { ry: Math.PI, s: .55 });
+    this.propOn(dr, 'book_encyclopedia_set_01', .82, 1.68, 1.6, { ry: Math.PI + .2 });
     st.lampM = lampM;
     this.prop('vintage_grandfather_clock_01', { x: -2.25, z: .75, ry: Math.PI / 2, solid: true });
     const pic = this.prop('hanging_picture_frame_01', { x: -2.48, z: -.9, ry: Math.PI / 2, ground: false }); pic.position.y = 1.75;
@@ -293,7 +383,8 @@ export class World3D {
     this.colliders.push({ x0: wx - .88, x1: wx + .88, z0: -2, z1: -1.0 });
     st.doors = [];
     cab.traverse((o) => { if (/door1$|door2$/.test(o.name)) st.doors.push({ o, rest: o.rotation.y, dir: o.position.x < 0 ? -1 : 1 }); });
-    const tin = this.box(.26, .12, .18, pbr('rusty_metal_02', .5, .3, { metal: .2, color: 0x8a8a8a }), wx, 1.42, -1.55);
+    const tinY = this.surfaceY(cab, wx, -1.5, 2.0, 1.36);
+    const tin = this.box(.26, .12, .18, pbr('rusty_metal_02', .5, .3, { metal: .2, color: 0x8a8a8a }), wx, tinY + .06, -1.5);
     // 摇椅
     const chair = st.chair = new THREE.Group(), rock = st.rock = new THREE.Group(); chair.add(rock);
     const cm = model('Rockingchair_01'); cm.position.y = -.1; rock.add(cm);
@@ -348,7 +439,7 @@ export class World3D {
     await G.wait(1500);
     // 灯回来时：它站在门边，摇椅转过来对着你
     st.winFig = false;
-    this.fig.visible = true; this.fig.position.set(-.55, 0, 1.45); this.faceTo(this.fig, this.p.x, this.p.z);
+    this.fig.visible = true; this.fig.position.set(-.95, 0, 1.2); this.faceTo(this.fig, this.p.x, this.p.z);
     this.faceTo(st.chair, this.p.x, this.p.z);
     st.seen = 0; st.roomFig = true;
     this.lightOff = false; this.flickerT = .4; st.dark = false;
@@ -371,9 +462,17 @@ export class World3D {
     for (let i = 0; i < 3; i++) this.box(1.1, .2 * (i + 1), .25, pbr('dark_wooden_planks', .6, .2), 0, .1 * (i + 1), 4.45 + i * .25);
     this.box(.95, 2.0, .06, pbr('rusty_metal_02', .6, 1.2, { metal: .6 }), 0, 1.3, 4.58);
     // 货架与杂物（扫描模型）
-    this.prop('steel_frame_shelves_01', { x: -1.5, z: 1.8, ry: Math.PI / 2, h: 2.0, solid: true });
-    this.prop('steel_frame_shelves_01', { x: 1.5, z: .2, ry: -Math.PI / 2, h: 2.0, solid: true });
-    this.prop('steel_frame_shelves_01', { x: -1.5, z: -2.2, ry: Math.PI / 2, h: 2.0, solid: true });
+    const sh1 = this.prop('steel_frame_shelves_01', { x: -1.5, z: 1.8, ry: Math.PI / 2, h: 2.0, solid: true });
+    const sh2 = this.prop('steel_frame_shelves_01', { x: 1.5, z: .2, ry: -Math.PI / 2, h: 2.0, solid: true });
+    const sh3 = this.prop('steel_frame_shelves_01', { x: -1.5, z: -2.2, ry: Math.PI / 2, h: 2.0, solid: true });
+    // 每层搁板的高度靠射线探测，避免物件悬空
+    const put = (shelf, id, x, z, from, o) => this.propOn(shelf, id, x, z, from, o);
+    put(sh1, 'cardboard_box_01', -1.5, 1.5, 1.2, { ry: 1.7 }); put(sh1, 'wine_bottles_01', -1.52, 2.1, 1.2, { ry: Math.PI / 2 });
+    put(sh1, 'plastic_bottle_gallon', -1.5, 2.0, .7, { ry: .4 }); put(sh1, 'plastic_bottle_gallon', -1.48, 1.75, .7, { ry: 2 }); put(sh1, 'metal_toolbox', -1.5, 1.6, 1.75, { ry: 1.5 });
+    put(sh2, 'wooden_bucket_01', 1.5, -.2, .7, { s: .8 }); put(sh2, 'cardboard_box_01', 1.5, .6, 1.2, { ry: -1.5 }); put(sh2, 'book_encyclopedia_set_01', 1.52, .1, 1.2, { ry: -Math.PI / 2 });
+    put(sh2, 'wine_bottles_01', 1.52, .2, 1.75, { ry: -Math.PI / 2 }); put(sh2, 'plastic_bottle_gallon', 1.5, .75, .7, { ry: 1 });
+    put(sh3, 'cardboard_box_01', -1.5, -2.5, .7, { ry: 1.4 }); put(sh3, 'wooden_bucket_01', -1.5, -1.9, 1.2, { s: .7 }); put(sh3, 'wine_bottles_01', -1.52, -2.3, 1.75, { ry: Math.PI / 2 });
+    const mask = this.prop('old_gas_mask', { x: -1.76, y: 1.2, z: 3.9, ry: Math.PI / 2, s: .75, ground: false });        // 挂在楼梯边墙上的旧防毒面具
     this.prop('wooden_crate_02', { x: 1.42, z: 3.2, ry: .2, solid: true });
     this.prop('wooden_crate_02', { x: 1.45, y: .45, z: 3.15, ry: 1.4, s: .8 });
     this.prop('Barrel_01', { x: 1.42, z: -2.6, solid: true });
@@ -381,7 +480,7 @@ export class World3D {
     this.prop('Barrel_01', { x: -1.4, z: -4.45, ry: 2, solid: true });
     this.prop('cardboard_box_01', { x: -1.4, z: -.4, ry: .5, s: 1.3 });
     this.prop('cardboard_box_01', { x: -1.45, z: 3.6, ry: -.3, s: 1.3 });
-    this.prop('metal_toolbox', { x: 1.4, z: 2.0, ry: -1.2 });
+    this.prop('wooden_bucket_01', { x: 1.35, z: 2.1, ry: -1.2 });
     // 电箱 + 电闸面板
     this.prop('power_box_01', { x: -.42, y: 1.45, z: -4.94, s: 1.3, ground: false });
     const bx = .28;
@@ -407,13 +506,13 @@ export class World3D {
     }
     // 墙上的手印（来电后才看得见）
     st.hands = new THREE.Group(); st.hands.visible = false; s.add(st.hands);
-    const hm = new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(handCanvas()), transparent: true, depthWrite: false, opacity: .9 });
+    const hm = new THREE.MeshStandardMaterial({ map: handprint(), transparent: true, depthWrite: false, opacity: 1, roughness: .95, polygonOffset: true, polygonOffsetFactor: -2, side: THREE.DoubleSide });
     for (let i = 0; i < 46; i++) {
-      const m = new THREE.Mesh(new THREE.PlaneGeometry(.24, .3), hm), side = i % 3;
+      const m = new THREE.Mesh(new THREE.PlaneGeometry(.25, .34), hm), side = i % 3;
       if (side === 0) { m.position.set(-1.795, rnd(.3, 2.2), rnd(-4.8, 4.2)); m.rotation.y = Math.PI / 2; }
       else if (side === 1) { m.position.set(1.795, rnd(.3, 2.2), rnd(-4.8, 4.2)); m.rotation.y = -Math.PI / 2; }
       else { m.position.set(rnd(-1.6, 1.6), rnd(.3, 2.3), -4.995); if (Math.abs(m.position.x) < .7 && m.position.y > .9 && m.position.y < 1.9) m.position.y = rnd(2.0, 2.4); }
-      m.rotateZ(rnd(-1.2, 1.2)); st.hands.add(m);
+      m.rotateZ(rnd(-1.2, 1.2)); m.scale.set((Math.random() < .5 ? -1 : 1) * rnd(.9, 1.15), rnd(.9, 1.15), 1); st.hands.add(m);   // 随机镜像成左右手
     }
     st.exitGlow = new THREE.PointLight(0xff2a1a, 0, 7, 1.5); st.exitGlow.position.set(0, 2.2, 4.2); s.add(st.exitGlow);
 
@@ -477,7 +576,7 @@ export class World3D {
     const G = this.G, st = this.st, p = this.p;
     st.phase = 'lit'; st.stalk = false; this.fig.visible = false; this.setMarker(null);
     G.ui.objective('……', '');
-    for (const { b, l } of st.bulbs) { b.material.color.setHex(0xfff0c8); l.intensity = 14; }
+    for (const { b, l } of st.bulbs) { b.material.color.setHex(0xfff0c8); l.intensity = 9; }
     for (const m of st.lampMats) m.emissiveIntensity = 2;
     G.sfx.hum(true); G.sfx.setDrone(.1); st.hands.visible = true;
     await G.wait(2600);
@@ -486,7 +585,7 @@ export class World3D {
     G.sfx.pop(); G.sfx.hum(false); G.sfx.setDrone(.8);
     for (const { b, l } of st.bulbs) { b.material.color.setHex(0x15130c); l.intensity = 0; }
     for (const m of st.lampMats) m.emissiveIntensity = 0;
-    this.flashBase = 15; this.weak = true; st.exitGlow.intensity = 5;
+    this.flashBase = 28; this.weak = true; st.exitGlow.intensity = 5;
     await G.wait(700);
     this.fig.visible = true; this.fig.position.set(p.x > 0 ? -1.1 : 1.1, 0, Math.max(-4.6, p.z - 4)); this.faceTo(this.fig, p.x, p.z);
     G.sfx.stinger(.6);
@@ -518,64 +617,114 @@ export class World3D {
   }
 
   // =====================================================================
-  //  结局：门外没有人，脚印朝里
+  //  结局：冲出门外 → 门自己关上并反锁 → 你亲手敲了四下
   // =====================================================================
   build_porch() {
-    const s = this.scene;
+    const s = this.scene, G = this.G, st = this.st;
     s.background = new THREE.Color(0x060a11);
-    s.fog = new THREE.FogExp2(0x060a11, .065);
-    s.add(new THREE.AmbientLight(0x7f97c8, .16));
-    const moon = new THREE.DirectionalLight(0x9fb8ff, .9); moon.position.set(-6, 9, -8); s.add(moon);
-    this.bounds = { x0: -1, x1: 1, z0: .5, z1: 2.8 }; this.canMove = false;
-    this.p.x = 0; this.p.z = 1.5; this.p.yaw = 0;
-    const wall = (len, hh) => pbr('wood_plank_wall', len / 2, hh / 2);
-    this.box(2.6, .2, 3.2, pbr('old_wood_floor', 1.3, 1.6), 0, -.1, 1.6); this.box(2.6, .2, 3.2, pbr('dark_wooden_planks', 1.3, 1.6), 0, 2.6, 1.6);
-    this.box(.2, 2.5, 3.2, wall(3.2, 2.5), -1.3, 1.25, 1.6); this.box(.2, 2.5, 3.2, wall(3.2, 2.5), 1.3, 1.25, 1.6);
-    this.box(2.6, 2.5, .2, wall(2.6, 2.5), 0, 1.25, 3.3);
-    this.box(.75, 2.5, .2, wall(.75, 2.5), -.87, 1.25, 0); this.box(.75, 2.5, .2, wall(.75, 2.5), .87, 1.25, 0);
-    this.box(1.0, .4, .2, wall(1, .4), 0, 2.3, 0);
-    const door = this.box(.06, 2.1, .98, pbr('dark_wooden_planks', .6, 1.2), -.47, 1.05, .52);   // 向内敞开的门
-    door.rotation.y = .12;
-    this.prop('Barrel_01', { x: .92, z: .55 });
-    // 雪地、树、脚印
-    const snow = new THREE.Mesh(new THREE.PlaneGeometry(80, 60), pbr('snow_02', 30, 22)); snow.rotation.x = -Math.PI / 2; snow.position.set(0, -.04, -30); snow.receiveShadow = true; s.add(snow);
+    s.fog = new THREE.FogExp2(0x060a11, .06);
+    s.add(new THREE.AmbientLight(0x7f97c8, .2));
+    const moon = new THREE.DirectionalLight(0x9fb8ff, .9); moon.position.set(-5, 9, -9); s.add(moon);
+    this.bounds = { x0: -1, x1: 1, z0: -2.6, z1: -1.2 }; this.canMove = false; this.dustOff = true;
+    this.p.x = 0; this.p.z = -2.2; this.p.yaw = Math.PI;           // 站在门外，面朝屋门
+    const wall = (len, hh) => pbr('wood_plank_wall', len / 2, hh / 2), dark = (rx, ry) => pbr('dark_wooden_planks', rx, ry);
+    // 门里的玄关（门关上之前能看到一瞬）
+    this.box(2.6, .2, 3.2, pbr('old_wood_floor', 1.3, 1.6), 0, -.1, 1.7); this.box(2.6, .2, 3.2, dark(1.3, 1.6), 0, 2.6, 1.7);
+    this.box(.2, 2.5, 3.2, wall(3.2, 2.5), -1.3, 1.25, 1.7); this.box(.2, 2.5, 3.2, wall(3.2, 2.5), 1.3, 1.25, 1.7);
+    this.box(2.6, 2.5, .2, wall(2.6, 2.5), 0, 1.25, 3.4);
+    // 木屋正面：门两侧的墙，左手边（厨房那一侧）有一扇窗
+    this.box(5.5, 3.3, .2, wall(5.5, 3.3), -3.25, 1.65, 0);
+    this.box(.65, 3.3, .2, wall(.65, 3.3), .825, 1.65, 0); this.box(3.65, 3.3, .2, wall(3.65, 3.3), 4.175, 1.65, 0);
+    this.box(1.2, 1.1, .2, wall(1.2, 1.1), 1.75, .55, 0); this.box(1.2, 1.3, .2, wall(1.2, 1.3), 1.75, 2.65, 0);
+    this.box(1.0, 1.2, .2, wall(1, 1.2), 0, 2.7, 0);
+    const fr = dark(.5, .5);
+    this.box(1.3, .07, .26, fr, 1.75, 1.1, 0); this.box(1.3, .07, .26, fr, 1.75, 2.0, 0); this.box(.07, .9, .26, fr, 1.15, 1.55, 0); this.box(.07, .9, .26, fr, 2.35, 1.55, 0);
+    this.box(.04, .9, .05, fr, 1.75, 1.55, -.08); this.box(1.2, .04, .05, fr, 1.75, 1.55, -.08);
+    st.pane = new THREE.Mesh(new THREE.PlaneGeometry(1.2, .9), new THREE.MeshBasicMaterial({ color: 0x030508, fog: false }));
+    st.pane.position.set(1.75, 1.55, .05); st.pane.rotation.y = Math.PI; s.add(st.pane);
+    st.glow = new THREE.PointLight(0xffb060, 0, 5, 1.8); st.glow.position.set(1.75, 1.5, -.5); s.add(st.glow);
+    for (const x of [-.56, .56]) this.box(.1, 2.2, .26, fr, x, 1.1, 0);                 // 门框
+    this.box(1.22, .1, .26, fr, 0, 2.15, 0);
+    // 门廊：木地板、柱子、屋檐
+    this.box(5, .12, 2.4, pbr('old_wood_floor', 2.5, 1.2), 0, -.04, -1.2);
+    for (const x of [-2.3, 2.3]) this.box(.15, 3.2, .15, fr, x, 1.6, -2.3);
+    this.box(12, .16, 2.9, dark(6, 1.4), 0, 3.3, -1.2);
+    this.prop('Barrel_01', { x: -1.5, z: -.45 }); this.prop('wooden_crate_02', { x: 3.9, z: -.5, ry: .3 });
+    // 屋门：铰链在一侧，开场时向屋里敞开
+    const piv = st.door = new THREE.Group(); piv.position.set(-.5, 1.05, .02); piv.rotation.y = -1.35; s.add(piv);
+    const slab = new THREE.Mesh(new THREE.BoxGeometry(1.0, 2.1, .06), dark(.6, 1.2)); slab.position.x = .5; slab.castShadow = slab.receiveShadow = true; piv.add(slab);
+    const knob = new THREE.Mesh(new THREE.SphereGeometry(.035, 12, 10), flat(0xb89a50, { metal: .9, rough: .35 })); knob.position.set(.9, -.05, -.06); piv.add(knob);
+    this.solids.push(slab);
+    // 它站在玄关里，没有跟出来
+    this.fig.visible = true; this.fig.position.set(0, 0, 2.3); this.fig.rotation.y = Math.PI;
+    // 雪地、树、通向屋门的脚印
+    const snow = new THREE.Mesh(new THREE.PlaneGeometry(90, 70), pbr('snow_02', 34, 26)); snow.rotation.x = -Math.PI / 2; snow.position.set(0, -.12, -30); snow.receiveShadow = true; s.add(snow);
     const tm = flat(0x04070a, { rough: 1 });
-    for (let i = 0; i < 60; i++) {
-      const x = rnd(-24, 24), z = rnd(-42, -7), hh = rnd(5, 10), r0 = rnd(1.1, 1.8);
-      if (Math.abs(x) < 1.8) continue;
+    for (let i = 0; i < 70; i++) {
+      const x = rnd(-26, 26), z = rnd(-44, -7), hh = rnd(5, 10), r0 = rnd(1.1, 1.8);
       const trunk = new THREE.Mesh(new THREE.CylinderGeometry(.1, .16, hh * .5, 6), tm); trunk.position.set(x, hh * .25, z); s.add(trunk);
       for (let k = 0; k < 4; k++) { const c = new THREE.Mesh(new THREE.ConeGeometry(r0 * (1 - k * .2), hh * .34, 8), tm); c.position.set(x, hh * (.38 + k * .17), z); s.add(c); }
     }
-    const fm = new THREE.MeshBasicMaterial({ color: 0x141c2b }), wet = new THREE.MeshBasicMaterial({ color: 0x0a0705, transparent: true, opacity: .8 });
-    for (let i = 0; i < 26; i++) {
-      const z = -9 + i * .42, inside = z > 0;
-      const f = new THREE.Mesh(new THREE.CircleGeometry(.1, 10), inside ? wet : fm);
-      f.rotation.x = -Math.PI / 2; f.scale.set(.8, 1.7, 1); f.position.set((i % 2 ? .13 : -.13) + Math.sin(i) * .03, inside ? .005 : -.03, z); s.add(f);
-    }
-    // 落雪
-    const N = 1800, pos = new Float32Array(N * 3);
-    for (let i = 0; i < N; i++) { pos[i * 3] = rnd(-9, 9); pos[i * 3 + 1] = rnd(0, 7); pos[i * 3 + 2] = rnd(-16, -.2); }
+    const wet = new THREE.MeshBasicMaterial({ color: 0x0a0705, transparent: true, opacity: .75 });
+    for (let i = 0; i < 6; i++) { const f = new THREE.Mesh(new THREE.CircleGeometry(.1, 10), wet); f.rotation.x = -Math.PI / 2; f.scale.set(.8, 1.7, 1); f.position.set((i % 2 ? .13 : -.13), .025, -2.3 + i * .4); s.add(f); }
+    const N = 2200, pos = new Float32Array(N * 3);
+    for (let i = 0; i < N; i++) { pos[i * 3] = rnd(-9, 9); pos[i * 3 + 1] = rnd(0, 7); pos[i * 3 + 2] = rnd(-16, -2.6); }
     const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     s.add(new THREE.Points(geo, new THREE.PointsMaterial({ color: 0xdde6f5, size: .04, transparent: true, opacity: .8 })));
+
+    Object.assign(st, { closed: false, slamAt: this.t + 2.7, stage: -1, n: 0, lit: false });
+    this.inter.push({ x: 0, z: 0, r: 3, label: () => (st.stage === 0 ? '开门' : '敲门'), can: () => st.stage === 0 || st.stage === 1, act: () => this.porchDoor() });
+
     this.tick = (dt) => {
       for (let i = 0; i < N; i++) { pos[i * 3 + 1] -= dt * 1.1; pos[i * 3] += dt * .5; if (pos[i * 3 + 1] < 0) { pos[i * 3 + 1] = 7; pos[i * 3] = rnd(-9, 9); } }
       geo.attributes.position.needsUpdate = true;
+      // 门自己甩上
+      if (!st.closed && this.t > st.slamAt) {
+        piv.rotation.y = Math.min(0, piv.rotation.y + dt * 9);
+        if (piv.rotation.y >= 0) { st.closed = true; this.fig.visible = false; this.shake = .25; G.sfx.slam(); }
+      }
+      // 屋里有人打着手电——窗户亮了
+      if (st.lit) {
+        const k = .55 + Math.sin(this.t * 5.3) * .2 + Math.sin(this.t * 13.1) * .12;
+        st.pane.material.color.setRGB(1.0 * k, .62 * k, .28 * k); st.glow.intensity = 2.2 * k;
+      }
     };
   }
   async porchEnding() {
-    const G = this.G, p = this.p;
-    await G.wait(2200);
-    await G.say(['……门外没有人。', '只有一串脚印。', '脚尖，朝着屋里。']);
-    G.sfx.setWind(.05); G.sfx.setDrone(0);
-    await G.wait(1600);
-    G.sfx.knock(4, { vol: 1.5, gap: .55 });
-    await G.wait(2900);
-    await G.say(['……四下。', '是从我背后传来的。']);
-    this.lightOff = true; this.lockLook = true; G.busy = true;
+    const G = this.G, st = this.st;
+    while (!st.closed) await G.wait(100);
     await G.wait(1100);
-    // 强制回头
-    const from = p.yaw, to = from + Math.PI;
-    for (let i = 1; i <= 10; i++) { p.yaw = from + (to - from) * (i / 10); p.pitch *= .6; await G.wait(22); }
-    await this.faceScare(520);
+    await G.say(['……门自己关上了。', '它没有跟出来。', '可是手机、车钥匙……全都在屋里。']);
+    st.stage = 0;
+    G.ui.objective('回屋里去', 'E 开门');
+    this.setMarker(.4, 1.0, -.1);
+  }
+  async porchDoor() {
+    const G = this.G, st = this.st;
+    if (st.stage === 0) {
+      st.stage = -1; G.sfx.clunk(); G.wait(180).then(() => G.sfx.clunk()); this.shake = .06;
+      await G.wait(500);
+      await G.say(['锁上了。', '……是从里面锁上的。', '里面要是还有别人——爷爷说过，敲三下的是人。']);
+      st.stage = 1; G.ui.objective('敲门', 'E 敲门');
+      return;
+    }
+    st.n++; st.stage = -1;
+    G.sfx.knock(1, { vol: 1.35 }); this.shake = .07;
+    if (st.n < 3) { await G.wait(330); st.stage = 1; return; }
+    if (st.n === 3) {
+      await G.wait(1900);
+      await G.say(['……没有人应。']);
+      st.stage = 1;                         // 提示还在——第四下，由玩家自己敲
+      return;
+    }
+    // 第四下
+    G.busy = true; this.lockLook = true;
+    G.ui.objective(null); G.ui.prompt(null); this.setMarker(null);
+    G.sfx.setWind(.08); G.sfx.setDrone(0);
+    await G.wait(1700);
+    st.lit = true;                          // 窗户里亮起手电的光
+    await G.wait(900);
+    await G.caption('……敲门声？', '屋里传来', 2300);
+    G.story.loopReplay();
   }
 }

@@ -36,6 +36,7 @@
   #dlg { position: absolute; left: 50%; bottom: 6%; transform: translateX(-50%); width: min(760px, 86%);
     padding: 16px 22px 20px; background: rgba(0,0,0,.82); border: 1px solid rgba(255,255,255,.18);
     font-size: 19px; line-height: 1.6; display: none; box-sizing: border-box; }
+  #dlgWho { font-size: 13px; letter-spacing: 3px; color: #c9a227; margin-bottom: 4px; display: none; }
   #dlg span { position: absolute; right: 12px; bottom: 5px; font-size: 11px; color: #777; }
   #center { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
     font-size: 30px; letter-spacing: 8px; color: #a11; text-shadow: 0 0 18px #400; }
@@ -69,7 +70,7 @@
   <div id="prompt"></div>
   <div id="hold"><div></div></div>
   <div id="lockhint">点击画面以控制视角（或用方向键转头）</div>
-  <div id="dlg"><div id="dlgText"></div><span>E / 空格 继续</span></div>
+  <div id="dlg"><div id="dlgWho"></div><div id="dlgText"></div><span>E / 空格 继续</span></div>
   <div id="center"></div>
 
   <div id="title" class="screen">
@@ -85,7 +86,7 @@
   <div id="end" class="screen">
     <h1>敲门</h1>
     <h2>DEMO 完 · 感谢游玩</h2>
-    <p>「敲三下的是人。敲四下的，别开。」<br>——可它从来没说，门是从哪一边敲的。</p>
+    <p>「四下的，是鬼。」<br>——那么，刚才敲门的是谁。</p>
     <button id="againBtn">再来一次</button>
   </div>
 </div>
